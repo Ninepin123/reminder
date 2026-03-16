@@ -2,7 +2,11 @@ import os
 import asyncio
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+# 使用台灣時區
+TZ = ZoneInfo("Asia/Taipei")
 from typing import Optional
 import discord
 from discord import app_commands
@@ -50,8 +54,11 @@ def load_data():
         # 載入一次性提醒
         for r in data.get('reminders', []):
             r['time'] = datetime.fromisoformat(r['time'])
+            # 如果沒有時區資訊，加上台灣時區
+            if r['time'].tzinfo is None:
+                r['time'] = r['time'].replace(tzinfo=TZ)
             # 只載入未過期的提醒
-            if r['time'] > datetime.now():
+            if r['time'] > datetime.now(TZ):
                 reminders.append(r)
 
         # 載入每日提醒
@@ -74,6 +81,7 @@ class ReminderBot(commands.Bot):
 
     async def on_ready(self):
         print(f'已登入: {self.user}')
+        print(f'當前時間 (台灣): {datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")}')
         # 載入已儲存的提醒
         load_data()
         print(f'已載入 {len(reminders)} 個一次性提醒')
@@ -100,13 +108,13 @@ def parse_time(time_str: str) -> Optional[datetime]:
         unit = match.group(2)
 
         if unit == 's':
-            return datetime.now() + timedelta(seconds=value)
+            return datetime.now(TZ) + timedelta(seconds=value)
         elif unit == 'm':
-            return datetime.now() + timedelta(minutes=value)
+            return datetime.now(TZ) + timedelta(minutes=value)
         elif unit == 'h':
-            return datetime.now() + timedelta(hours=value)
+            return datetime.now(TZ) + timedelta(hours=value)
         elif unit == 'd':
-            return datetime.now() + timedelta(days=value)
+            return datetime.now(TZ) + timedelta(days=value)
 
     # 完整日期時間格式 (2024-03-16 15:30)
     try:
@@ -117,9 +125,9 @@ def parse_time(time_str: str) -> Optional[datetime]:
     # 只有時間格式 (15:30)
     try:
         time_part = datetime.strptime(time_str, '%H:%M').time()
-        reminder_time = datetime.combine(datetime.now().date(), time_part)
+        reminder_time = datetime.combine(datetime.now(TZ).date(), time_part, tzinfo=TZ)
         # 如果時間已過，設為明天
-        if reminder_time < datetime.now():
+        if reminder_time < datetime.now(TZ):
             reminder_time += timedelta(days=1)
         return reminder_time
     except ValueError:
@@ -144,7 +152,7 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
         )
         return
 
-    if reminder_time < datetime.now():
+    if reminder_time < datetime.now(TZ):
         await interaction.response.send_message(
             "❌ 提醒時間不能是過去的時間！",
             ephemeral=True
@@ -196,7 +204,7 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         'time': time,  # 存儲為字串 "HH:MM"
         'user_id': interaction.user.id,
         'guild_id': interaction.guild_id,
-        'created_at': datetime.now().isoformat()
+        'created_at': datetime.now(TZ).isoformat()
     }
     daily_reminders.append(daily)
     save_data()
@@ -279,7 +287,7 @@ async def check_reminders():
     last_daily_check = {}
 
     while not bot.is_closed():
-        now = datetime.now()
+        now = datetime.now(TZ)
 
         # === 檢查一次性提醒 ===
         due_reminders = []
