@@ -291,8 +291,7 @@ async def check_reminders():
             try:
                 channel = bot.get_channel(reminder['channel_id'])
                 if channel:
-                    user_mention = f"<@{reminder['user_id']}>"
-                    content = f"🔔 {user_mention} 提醒時間到了！\n\n{reminder['message']}"
+                    content = reminder['message']
                     await channel.send(content)
             except Exception as e:
                 print(f"發送提醒時出錯: {e}")
@@ -313,8 +312,7 @@ async def check_reminders():
                     try:
                         channel = bot.get_channel(daily['channel_id'])
                         if channel:
-                            user_mention = f"<@{daily['user_id']}>"
-                            content = f"📆 {user_mention} 每日提醒！\n\n{daily['message']}"
+                            content = daily['message']
                             await channel.send(content)
                     except Exception as e:
                         print(f"發送每日提醒時出錯: {e}")
