@@ -1,10 +1,11 @@
 import os
 import asyncio
-import sqlite3
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
+import mysql.connector
+from mysql.connector import Error
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -16,171 +17,233 @@ load_dotenv()
 # 使用台灣時區
 TZ = ZoneInfo("Asia/Taipei")
 
-# 資料庫路徑
-DB_FILE = "reminders.db"
+# MySQL 連線設定
+MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
+MYSQL_PORT = int(os.getenv('MYSQL_PORT', 3306))
+MYSQL_USER = os.getenv('MYSQL_USER')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
+MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
+
+def get_db_connection():
+    """取得資料庫連線"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset='utf8mb4'
+        )
+        return conn
+    except Error as e:
+        print(f"資料庫連線錯誤: {e}")
+        return None
 
 def init_db():
     """初始化資料庫"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
+    if not conn:
+        return False
+
     cursor = conn.cursor()
 
     # 一次性提醒表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            channel_id BIGINT NOT NULL,
             message TEXT NOT NULL,
-            time TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            guild_id INTEGER
+            time DATETIME NOT NULL,
+            user_id BIGINT NOT NULL,
+            guild_id BIGINT
         )
     ''')
 
     # 每日提醒表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS daily_reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER NOT NULL,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            channel_id BIGINT NOT NULL,
             message TEXT NOT NULL,
-            time TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            guild_id INTEGER,
-            created_at TEXT
+            time VARCHAR(5) NOT NULL,
+            user_id BIGINT NOT NULL,
+            guild_id BIGINT,
+            created_at DATETIME
         )
     ''')
 
     conn.commit()
+    cursor.close()
     conn.close()
+    return True
 
 def add_reminder(channel_id: int, message: str, time: datetime, user_id: int, guild_id: int):
     """新增一次性提醒"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
+    if not conn:
+        return False
+
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO reminders (channel_id, message, time, user_id, guild_id)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (channel_id, message, time.isoformat(), user_id, guild_id))
+        VALUES (%s, %s, %s, %s, %s)
+    ''', (channel_id, message, time, user_id, guild_id))
     conn.commit()
+    cursor.close()
     conn.close()
+    return True
 
 def get_reminders(user_id: int = None):
     """取得提醒列表"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    cursor = conn.cursor(dictionary=True)
 
     if user_id:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE user_id = %s', (user_id,))
     else:
         cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders')
 
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     reminders = []
     for row in rows:
         reminders.append({
-            'id': row[0],
-            'channel_id': row[1],
-            'message': row[2],
-            'time': datetime.fromisoformat(row[3]),
-            'user_id': row[4],
-            'guild_id': row[5]
+            'id': row['id'],
+            'channel_id': row['channel_id'],
+            'message': row['message'],
+            'time': row['time'],
+            'user_id': row['user_id'],
+            'guild_id': row['guild_id']
         })
     return reminders
 
 def get_due_reminders(now: datetime):
     """取得到期的提醒"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= ?', (now.isoformat(),))
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now,))
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     reminders = []
     for row in rows:
         reminders.append({
-            'id': row[0],
-            'channel_id': row[1],
-            'message': row[2],
-            'time': datetime.fromisoformat(row[3]),
-            'user_id': row[4],
-            'guild_id': row[5]
+            'id': row['id'],
+            'channel_id': row['channel_id'],
+            'message': row['message'],
+            'time': row['time'],
+            'user_id': row['user_id'],
+            'guild_id': row['guild_id']
         })
     return reminders
 
 def delete_reminder(reminder_id: int):
     """刪除提醒"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
+    if not conn:
+        return False
+
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
+    cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
     conn.commit()
+    cursor.close()
     conn.close()
+    return True
 
 def delete_reminder_by_user(user_id: int, index: int):
     """根據用戶和索引刪除提醒"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT id FROM reminders WHERE user_id = ? ORDER BY time', (user_id,))
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute('SELECT id FROM reminders WHERE user_id = %s ORDER BY time', (user_id,))
     rows = cursor.fetchall()
 
     if 1 <= index <= len(rows):
-        reminder_id = rows[index - 1][0]
-        cursor.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
+        reminder_id = rows[index - 1]['id']
+        cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
         conn.commit()
+        cursor.close()
         conn.close()
         return True
+    cursor.close()
     conn.close()
     return False
 
 def add_daily_reminder(channel_id: int, message: str, time: str, user_id: int, guild_id: int):
     """新增每日提醒"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
+    if not conn:
+        return False
+
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO daily_reminders (channel_id, message, time, user_id, guild_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ).isoformat()))
+        VALUES (%s, %s, %s, %s, %s, %s)
+    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ)))
     conn.commit()
+    cursor.close()
     conn.close()
+    return True
 
 def get_daily_reminders(user_id: int = None):
     """取得每日提醒列表"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    cursor = conn.cursor(dictionary=True)
 
     if user_id:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders WHERE user_id = %s', (user_id,))
     else:
         cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders')
 
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     dailies = []
     for row in rows:
         dailies.append({
-            'id': row[0],
-            'channel_id': row[1],
-            'message': row[2],
-            'time': row[3],
-            'user_id': row[4],
-            'guild_id': row[5]
+            'id': row['id'],
+            'channel_id': row['channel_id'],
+            'message': row['message'],
+            'time': row['time'],
+            'user_id': row['user_id'],
+            'guild_id': row['guild_id']
         })
     return dailies
 
 def delete_daily_reminder_by_user(user_id: int, index: int):
     """根據用戶和索引刪除每日提醒"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT id FROM daily_reminders WHERE user_id = ? ORDER BY time', (user_id,))
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute('SELECT id FROM daily_reminders WHERE user_id = %s ORDER BY time', (user_id,))
     rows = cursor.fetchall()
 
     if 1 <= index <= len(rows):
-        reminder_id = rows[index - 1][0]
-        cursor.execute('DELETE FROM daily_reminders WHERE id = ?', (reminder_id,))
+        reminder_id = rows[index - 1]['id']
+        cursor.execute('DELETE FROM daily_reminders WHERE id = %s', (reminder_id,))
         conn.commit()
+        cursor.close()
         conn.close()
         return True
+    cursor.close()
     conn.close()
     return False
 
@@ -196,9 +259,12 @@ class ReminderBot(commands.Bot):
     async def on_ready(self):
         print(f'已登入: {self.user}')
         print(f'當前時間 (台灣): {datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")}')
-        init_db()
-        print(f'一次性提醒: {len(get_reminders())} 個')
-        print(f'每日提醒: {len(get_daily_reminders())} 個')
+        if init_db():
+            print('✅ 資料庫連線成功')
+            print(f'一次性提醒: {len(get_reminders())} 個')
+            print(f'每日提醒: {len(get_daily_reminders())} 個')
+        else:
+            print('❌ 資料庫連線失敗')
         self.loop.create_task(check_reminders())
 
 bot = ReminderBot()
@@ -270,22 +336,25 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
         )
         return
 
-    add_reminder(
+    if add_reminder(
         channel_id=interaction.channel_id,
         message=message,
         time=reminder_time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
-    )
-
-    time_display = reminder_time.strftime('%Y-%m-%d %H:%M:%S')
-
-    await interaction.response.send_message(
-        f"✅ 已設置提醒！\n"
-        f"📝 內容：{message}\n"
-        f"⏰ 時間：{time_display}",
-        ephemeral=True
-    )
+    ):
+        time_display = reminder_time.strftime('%Y-%m-%d %H:%M:%S')
+        await interaction.response.send_message(
+            f"✅ 已設置提醒！\n"
+            f"📝 內容：{message}\n"
+            f"⏰ 時間：{time_display}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ 設置提醒失敗，請稍後再試",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="daily", description="設置每天定時提醒")
 @app_commands.describe(
@@ -303,20 +372,24 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         )
         return
 
-    add_daily_reminder(
+    if add_daily_reminder(
         channel_id=interaction.channel_id,
         message=message,
         time=time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
-    )
-
-    await interaction.response.send_message(
-        f"✅ 已設置每日提醒！\n"
-        f"📝 內容：{message}\n"
-        f"⏰ 每天時間：{time}",
-        ephemeral=True
-    )
+    ):
+        await interaction.response.send_message(
+            f"✅ 已設置每日提醒！\n"
+            f"📝 內容：{message}\n"
+            f"⏰ 每天時間：{time}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ 設置每日提醒失敗，請稍後再試",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="reminders", description="查看所有待處理的提醒")
 async def list_reminders(interaction: discord.Interaction):
@@ -436,6 +509,11 @@ def main():
     token = os.getenv('DISCORD_TOKEN')
     if not token:
         print("❌ 請在 .env 文件中設置 DISCORD_TOKEN")
+        return
+
+    if not all([MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE]):
+        print("❌ 請在 .env 文件中設置 MySQL 連線資訊")
+        print("   MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE")
         return
 
     init_db()
