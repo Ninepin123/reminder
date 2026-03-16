@@ -1,12 +1,9 @@
 import os
 import asyncio
-import json
+import sqlite3
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-
-# 使用台灣時區
-TZ = ZoneInfo("Asia/Taipei")
 from typing import Optional
 import discord
 from discord import app_commands
@@ -16,58 +13,176 @@ from dotenv import load_dotenv
 # 載入環境變數
 load_dotenv()
 
-# 儲存提醒任務
-reminders = []
-daily_reminders = []
+# 使用台灣時區
+TZ = ZoneInfo("Asia/Taipei")
 
-# 持久化文件路徑
-REMINDERS_FILE = "reminders.json"
-DAILY_FILE = "daily_reminders.json"
+# 資料庫路徑
+DB_FILE = "reminders.db"
 
-def save_data():
-    """儲存資料到文件"""
-    data = {
-        'reminders': [],
-        'daily_reminders': daily_reminders
-    }
+def init_db():
+    """初始化資料庫"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
 
-    for r in reminders:
-        data['reminders'].append({
-            'channel_id': r['channel_id'],
-            'message': r['message'],
-            'time': r['time'].isoformat(),
-            'user_id': r['user_id'],
-            'guild_id': r['guild_id']
+    # 一次性提醒表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            time TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER
+        )
+    ''')
+
+    # 每日提醒表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            time TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER,
+            created_at TEXT
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+def add_reminder(channel_id: int, message: str, time: datetime, user_id: int, guild_id: int):
+    """新增一次性提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO reminders (channel_id, message, time, user_id, guild_id)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (channel_id, message, time.isoformat(), user_id, guild_id))
+    conn.commit()
+    conn.close()
+
+def get_reminders(user_id: int = None):
+    """取得提醒列表"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    if user_id:
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE user_id = ?', (user_id,))
+    else:
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders')
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    reminders = []
+    for row in rows:
+        reminders.append({
+            'id': row[0],
+            'channel_id': row[1],
+            'message': row[2],
+            'time': datetime.fromisoformat(row[3]),
+            'user_id': row[4],
+            'guild_id': row[5]
         })
+    return reminders
 
-    with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def get_due_reminders(now: datetime):
+    """取得到期的提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= ?', (now.isoformat(),))
+    rows = cursor.fetchall()
+    conn.close()
 
-def load_data():
-    """從文件載入資料"""
-    global reminders, daily_reminders
+    reminders = []
+    for row in rows:
+        reminders.append({
+            'id': row[0],
+            'channel_id': row[1],
+            'message': row[2],
+            'time': datetime.fromisoformat(row[3]),
+            'user_id': row[4],
+            'guild_id': row[5]
+        })
+    return reminders
 
-    try:
-        with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+def delete_reminder(reminder_id: int):
+    """刪除提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
+    conn.commit()
+    conn.close()
 
-        # 載入一次性提醒
-        for r in data.get('reminders', []):
-            r['time'] = datetime.fromisoformat(r['time'])
-            # 如果沒有時區資訊，加上台灣時區
-            if r['time'].tzinfo is None:
-                r['time'] = r['time'].replace(tzinfo=TZ)
-            # 只載入未過期的提醒
-            if r['time'] > datetime.now(TZ):
-                reminders.append(r)
+def delete_reminder_by_user(user_id: int, index: int):
+    """根據用戶和索引刪除提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM reminders WHERE user_id = ? ORDER BY time', (user_id,))
+    rows = cursor.fetchall()
 
-        # 載入每日提醒
-        daily_reminders = data.get('daily_reminders', [])
+    if 1 <= index <= len(rows):
+        reminder_id = rows[index - 1][0]
+        cursor.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"載入資料時出錯: {e}")
+def add_daily_reminder(channel_id: int, message: str, time: str, user_id: int, guild_id: int):
+    """新增每日提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO daily_reminders (channel_id, message, time, user_id, guild_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ).isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_daily_reminders(user_id: int = None):
+    """取得每日提醒列表"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    if user_id:
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders WHERE user_id = ?', (user_id,))
+    else:
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders')
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    dailies = []
+    for row in rows:
+        dailies.append({
+            'id': row[0],
+            'channel_id': row[1],
+            'message': row[2],
+            'time': row[3],
+            'user_id': row[4],
+            'guild_id': row[5]
+        })
+    return dailies
+
+def delete_daily_reminder_by_user(user_id: int, index: int):
+    """根據用戶和索引刪除每日提醒"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM daily_reminders WHERE user_id = ? ORDER BY time', (user_id,))
+    rows = cursor.fetchall()
+
+    if 1 <= index <= len(rows):
+        reminder_id = rows[index - 1][0]
+        cursor.execute('DELETE FROM daily_reminders WHERE id = ?', (reminder_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 class ReminderBot(commands.Bot):
     def __init__(self):
@@ -76,17 +191,14 @@ class ReminderBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # 註冊 slash command
         await self.tree.sync()
 
     async def on_ready(self):
         print(f'已登入: {self.user}')
         print(f'當前時間 (台灣): {datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")}')
-        # 載入已儲存的提醒
-        load_data()
-        print(f'已載入 {len(reminders)} 個一次性提醒')
-        print(f'已載入 {len(daily_reminders)} 個每日提醒')
-        # 啟動提醒檢查任務
+        init_db()
+        print(f'一次性提醒: {len(get_reminders())} 個')
+        print(f'每日提醒: {len(get_daily_reminders())} 個')
         self.loop.create_task(check_reminders())
 
 bot = ReminderBot()
@@ -126,7 +238,6 @@ def parse_time(time_str: str) -> Optional[datetime]:
     try:
         time_part = datetime.strptime(time_str, '%H:%M').time()
         reminder_time = datetime.combine(datetime.now(TZ).date(), time_part, tzinfo=TZ)
-        # 如果時間已過，設為明天
         if reminder_time < datetime.now(TZ):
             reminder_time += timedelta(days=1)
         return reminder_time
@@ -159,18 +270,14 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
         )
         return
 
-    # 儲存提醒
-    reminder = {
-        'channel_id': interaction.channel_id,
-        'message': message,
-        'time': reminder_time,
-        'user_id': interaction.user.id,
-        'guild_id': interaction.guild_id
-    }
-    reminders.append(reminder)
-    save_data()
+    add_reminder(
+        channel_id=interaction.channel_id,
+        message=message,
+        time=reminder_time,
+        user_id=interaction.user.id,
+        guild_id=interaction.guild_id
+    )
 
-    # 格式化顯示時間
     time_display = reminder_time.strftime('%Y-%m-%d %H:%M:%S')
 
     await interaction.response.send_message(
@@ -187,9 +294,8 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
 )
 async def daily_remind(interaction: discord.Interaction, message: str, time: str):
     """設置每日提醒命令"""
-    # 驗證時間格式
     try:
-        time_part = datetime.strptime(time, '%H:%M').time()
+        datetime.strptime(time, '%H:%M')
     except ValueError:
         await interaction.response.send_message(
             "❌ 無法解析時間格式！請使用 `HH:MM` 格式，例如：`09:00`",
@@ -197,17 +303,13 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         )
         return
 
-    # 儲存每日提醒
-    daily = {
-        'channel_id': interaction.channel_id,
-        'message': message,
-        'time': time,  # 存儲為字串 "HH:MM"
-        'user_id': interaction.user.id,
-        'guild_id': interaction.guild_id,
-        'created_at': datetime.now(TZ).isoformat()
-    }
-    daily_reminders.append(daily)
-    save_data()
+    add_daily_reminder(
+        channel_id=interaction.channel_id,
+        message=message,
+        time=time,
+        user_id=interaction.user.id,
+        guild_id=interaction.guild_id
+    )
 
     await interaction.response.send_message(
         f"✅ 已設置每日提醒！\n"
@@ -219,8 +321,8 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
 @bot.tree.command(name="reminders", description="查看所有待處理的提醒")
 async def list_reminders(interaction: discord.Interaction):
     """列出所有提醒"""
-    user_reminders = [r for r in reminders if r['user_id'] == interaction.user.id]
-    user_dailies = [d for d in daily_reminders if d['user_id'] == interaction.user.id]
+    user_reminders = get_reminders(interaction.user.id)
+    user_dailies = get_daily_reminders(interaction.user.id)
 
     if not user_reminders and not user_dailies:
         await interaction.response.send_message("📭 你沒有待處理的提醒。", ephemeral=True)
@@ -228,14 +330,12 @@ async def list_reminders(interaction: discord.Interaction):
 
     embed = discord.Embed(title="📋 你的提醒列表", color=discord.Color.blue())
 
-    # 一次性提醒
     if user_reminders:
         for i, reminder in enumerate(user_reminders, 1):
             time_str = reminder['time'].strftime('%Y-%m-%d %H:%M:%S')
             message_preview = reminder['message'][:40] + "..." if len(reminder['message']) > 40 else reminder['message']
             embed.add_field(name=f"🔔 一次性 #{i}", value=f"⏰ {time_str}\n📝 {message_preview}", inline=False)
 
-    # 每日提醒
     if user_dailies:
         for i, daily in enumerate(user_dailies, 1):
             message_preview = daily['message'][:40] + "..." if len(daily['message']) > 40 else daily['message']
@@ -247,15 +347,14 @@ async def list_reminders(interaction: discord.Interaction):
 @app_commands.describe(index="要取消的提醒編號（使用 /reminders 查看）")
 async def cancel_reminder(interaction: discord.Interaction, index: int):
     """取消提醒"""
-    user_reminders = [(i, r) for i, r in enumerate(reminders) if r['user_id'] == interaction.user.id]
+    user_reminders = get_reminders(interaction.user.id)
 
     if index < 1 or index > len(user_reminders):
         await interaction.response.send_message("❌ 無效的提醒編號！", ephemeral=True)
         return
 
-    original_index = user_reminders[index - 1][0]
-    removed = reminders.pop(original_index)
-    save_data()
+    removed = user_reminders[index - 1]
+    delete_reminder(removed['id'])
 
     await interaction.response.send_message(
         f"✅ 已取消提醒：{removed['message'][:50]}",
@@ -266,15 +365,14 @@ async def cancel_reminder(interaction: discord.Interaction, index: int):
 @app_commands.describe(index="要取消的每日提醒編號（使用 /reminders 查看）")
 async def cancel_daily(interaction: discord.Interaction, index: int):
     """取消每日提醒"""
-    user_dailies = [(i, d) for i, d in enumerate(daily_reminders) if d['user_id'] == interaction.user.id]
+    user_dailies = get_daily_reminders(interaction.user.id)
 
     if index < 1 or index > len(user_dailies):
         await interaction.response.send_message("❌ 無效的每日提醒編號！", ephemeral=True)
         return
 
-    original_index = user_dailies[index - 1][0]
-    removed = daily_reminders.pop(original_index)
-    save_data()
+    removed = user_dailies[index - 1]
+    delete_daily_reminder_by_user(interaction.user.id, index)
 
     await interaction.response.send_message(
         f"✅ 已取消每日提醒：{removed['message'][:50]}",
@@ -290,28 +388,27 @@ async def check_reminders():
         now = datetime.now(TZ)
 
         # === 檢查一次性提醒 ===
-        due_reminders = []
-        for reminder in reminders:
-            if reminder['time'] <= now:
-                due_reminders.append(reminder)
+        due_reminders = get_due_reminders(now)
 
         for reminder in due_reminders:
             try:
                 channel = bot.get_channel(reminder['channel_id'])
                 if channel:
-                    content = reminder['message']
-                    await channel.send(content)
+                    await channel.send(reminder['message'])
+                    print(f"[提醒已發送] {reminder['time']} - {reminder['message']}")
+                else:
+                    print(f"[錯誤] 無法獲取頻道 ID: {reminder['channel_id']}")
             except Exception as e:
                 print(f"發送提醒時出錯: {e}")
 
-            reminders.remove(reminder)
+            delete_reminder(reminder['id'])
 
         # === 檢查每日提醒 ===
         current_time_str = now.strftime('%H:%M')
+        daily_reminders = get_daily_reminders()
 
         for daily in daily_reminders:
             if daily['time'] == current_time_str:
-                # 使用 channel_id + time 作為 key，確保每個提醒每天只發一次
                 check_key = f"{daily['channel_id']}_{daily['time']}_{now.strftime('%Y-%m-%d')}"
 
                 if check_key not in last_daily_check:
@@ -320,22 +417,19 @@ async def check_reminders():
                     try:
                         channel = bot.get_channel(daily['channel_id'])
                         if channel:
-                            content = daily['message']
-                            await channel.send(content)
+                            await channel.send(daily['message'])
+                            print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
+                        else:
+                            print(f"[錯誤] 無法獲取頻道 ID: {daily['channel_id']}")
                     except Exception as e:
                         print(f"發送每日提醒時出錯: {e}")
 
-        # 清理過期的 last_daily_check（保留最近3天的記錄）
+        # 清理過期的 last_daily_check
         today_str = now.strftime('%Y-%m-%d')
         keys_to_remove = [k for k in last_daily_check if today_str not in k]
         for k in keys_to_remove:
             del last_daily_check[k]
 
-        # 儲存資料
-        if due_reminders:
-            save_data()
-
-        # 每1秒檢查一次（確保不會錯過每日提醒）
         await asyncio.sleep(1)
 
 def main():
@@ -344,6 +438,7 @@ def main():
         print("❌ 請在 .env 文件中設置 DISCORD_TOKEN")
         return
 
+    init_db()
     bot.run(token)
 
 if __name__ == "__main__":
