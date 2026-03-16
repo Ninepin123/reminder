@@ -259,10 +259,12 @@ class ReminderBot(commands.Bot):
     async def on_ready(self):
         print(f'已登入: {self.user}')
         print(f'當前時間 (台灣): {datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")}')
-        if init_db():
+        if await asyncio.to_thread(init_db):
             print('✅ 資料庫連線成功')
-            print(f'一次性提醒: {len(get_reminders())} 個')
-            print(f'每日提醒: {len(get_daily_reminders())} 個')
+            reminders = await asyncio.to_thread(get_reminders)
+            dailies = await asyncio.to_thread(get_daily_reminders)
+            print(f'一次性提醒: {len(reminders)} 個')
+            print(f'每日提醒: {len(dailies)} 個')
         else:
             print('❌ 資料庫連線失敗')
         self.loop.create_task(check_reminders())
@@ -336,13 +338,15 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
         )
         return
 
-    if add_reminder(
+    success = await asyncio.to_thread(
+        add_reminder,
         channel_id=interaction.channel_id,
         message=message,
         time=reminder_time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
-    ):
+    )
+    if success:
         time_display = reminder_time.strftime('%Y-%m-%d %H:%M:%S')
         await interaction.response.send_message(
             f"✅ 已設置提醒！\n"
@@ -372,13 +376,15 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         )
         return
 
-    if add_daily_reminder(
+    success = await asyncio.to_thread(
+        add_daily_reminder,
         channel_id=interaction.channel_id,
         message=message,
         time=time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
-    ):
+    )
+    if success:
         await interaction.response.send_message(
             f"✅ 已設置每日提醒！\n"
             f"📝 內容：{message}\n"
@@ -394,8 +400,8 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
 @bot.tree.command(name="reminders", description="查看所有待處理的提醒")
 async def list_reminders(interaction: discord.Interaction):
     """列出所有提醒"""
-    user_reminders = get_reminders(interaction.user.id)
-    user_dailies = get_daily_reminders(interaction.user.id)
+    user_reminders = await asyncio.to_thread(get_reminders, interaction.user.id)
+    user_dailies = await asyncio.to_thread(get_daily_reminders, interaction.user.id)
 
     if not user_reminders and not user_dailies:
         await interaction.response.send_message("📭 你沒有待處理的提醒。", ephemeral=True)
@@ -420,14 +426,14 @@ async def list_reminders(interaction: discord.Interaction):
 @app_commands.describe(index="要取消的提醒編號（使用 /reminders 查看）")
 async def cancel_reminder(interaction: discord.Interaction, index: int):
     """取消提醒"""
-    user_reminders = get_reminders(interaction.user.id)
+    user_reminders = await asyncio.to_thread(get_reminders, interaction.user.id)
 
     if index < 1 or index > len(user_reminders):
         await interaction.response.send_message("❌ 無效的提醒編號！", ephemeral=True)
         return
 
     removed = user_reminders[index - 1]
-    delete_reminder(removed['id'])
+    await asyncio.to_thread(delete_reminder, removed['id'])
 
     await interaction.response.send_message(
         f"✅ 已取消提醒：{removed['message'][:50]}",
@@ -438,14 +444,14 @@ async def cancel_reminder(interaction: discord.Interaction, index: int):
 @app_commands.describe(index="要取消的每日提醒編號（使用 /reminders 查看）")
 async def cancel_daily(interaction: discord.Interaction, index: int):
     """取消每日提醒"""
-    user_dailies = get_daily_reminders(interaction.user.id)
+    user_dailies = await asyncio.to_thread(get_daily_reminders, interaction.user.id)
 
     if index < 1 or index > len(user_dailies):
         await interaction.response.send_message("❌ 無效的每日提醒編號！", ephemeral=True)
         return
 
     removed = user_dailies[index - 1]
-    delete_daily_reminder_by_user(interaction.user.id, index)
+    await asyncio.to_thread(delete_daily_reminder_by_user, interaction.user.id, index)
 
     await interaction.response.send_message(
         f"✅ 已取消每日提醒：{removed['message'][:50]}",
@@ -461,7 +467,7 @@ async def check_reminders():
         now = datetime.now(TZ)
 
         # === 檢查一次性提醒 ===
-        due_reminders = get_due_reminders(now)
+        due_reminders = await asyncio.to_thread(get_due_reminders, now)
 
         for reminder in due_reminders:
             try:
@@ -474,11 +480,11 @@ async def check_reminders():
             except Exception as e:
                 print(f"發送提醒時出錯: {e}")
 
-            delete_reminder(reminder['id'])
+            await asyncio.to_thread(delete_reminder, reminder['id'])
 
         # === 檢查每日提醒 ===
         current_time_str = now.strftime('%H:%M')
-        daily_reminders = get_daily_reminders()
+        daily_reminders = await asyncio.to_thread(get_daily_reminders)
 
         for daily in daily_reminders:
             if daily['time'] == current_time_str:
