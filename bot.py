@@ -278,41 +278,35 @@ class ReminderBot(commands.Bot):
 bot = ReminderBot()
 
 def parse_time(time_str: str) -> Optional[datetime]:
-    """
-    解析時間字串，支援格式：
-    - 5s, 10m, 2h, 1d (秒/分/時/天)
-    - 2024-03-16 15:30 (指定日期時間)
-    - 15:30 (今天指定時間)
-    """
     time_str = time_str.strip()
 
-    # 相對時間格式 (5s, 10m, 2h, 1d)
     relative_pattern = r'^(\d+)(s|m|h|d)$'
     match = re.match(relative_pattern, time_str.lower())
     if match:
         value = int(match.group(1))
         unit = match.group(2)
 
+        now = datetime.now(TZ)
         if unit == 's':
-            return datetime.now(TZ) + timedelta(seconds=value)
+            return now + timedelta(seconds=value)
         elif unit == 'm':
-            return datetime.now(TZ) + timedelta(minutes=value)
+            return now + timedelta(minutes=value)
         elif unit == 'h':
-            return datetime.now(TZ) + timedelta(hours=value)
+            return now + timedelta(hours=value)
         elif unit == 'd':
-            return datetime.now(TZ) + timedelta(days=value)
+            return now + timedelta(days=value)
 
-    # 完整日期時間格式 (2024-03-16 15:30)
     try:
-        return datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+        dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+        return dt.replace(tzinfo=TZ)
     except ValueError:
         pass
 
-    # 只有時間格式 (15:30)
     try:
         time_part = datetime.strptime(time_str, '%H:%M').time()
-        reminder_time = datetime.combine(datetime.now(TZ).date(), time_part, tzinfo=TZ)
-        if reminder_time < datetime.now(TZ):
+        now = datetime.now(TZ)
+        reminder_time = datetime.combine(now.date(), time_part, tzinfo=TZ)
+        if reminder_time < now:
             reminder_time += timedelta(days=1)
         return reminder_time
     except ValueError:
@@ -478,15 +472,17 @@ async def check_reminders():
         for reminder in due_reminders:
             try:
                 channel = bot.get_channel(reminder['channel_id'])
-                if channel:
-                    await channel.send(reminder['message'])
-                    print(f"[提醒已發送] {reminder['time']} - {reminder['message']}")
-                else:
-                    print(f"[錯誤] 無法獲取頻道 ID: {reminder['channel_id']}")
-            except Exception as e:
-                print(f"發送提醒時出錯: {e}")
+                if channel is None:
+                    channel = await bot.fetch_channel(reminder['channel_id'])
 
-            await asyncio.to_thread(delete_reminder, reminder['id'])
+                await channel.send(reminder['message'])
+                print(f"[提醒已發送] {reminder['time']} - {reminder['message']}")
+
+                # 只有送成功才刪除
+                await asyncio.to_thread(delete_reminder, reminder['id'])
+
+            except Exception as e:
+                print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
 
         # === 檢查每日提醒 ===
         current_time_str = now.strftime('%H:%M')
@@ -494,28 +490,28 @@ async def check_reminders():
 
         for daily in daily_reminders:
             if daily['time'] == current_time_str:
-                check_key = f"{daily['channel_id']}_{daily['time']}_{now.strftime('%Y-%m-%d')}"
+                check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
 
                 if check_key not in last_daily_check:
-                    last_daily_check[check_key] = True
-
                     try:
                         channel = bot.get_channel(daily['channel_id'])
-                        if channel:
-                            await channel.send(daily['message'])
-                            print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
-                        else:
-                            print(f"[錯誤] 無法獲取頻道 ID: {daily['channel_id']}")
-                    except Exception as e:
-                        print(f"發送每日提醒時出錯: {e}")
+                        if channel is None:
+                            channel = await bot.fetch_channel(daily['channel_id'])
 
-        # 清理過期的 last_daily_check
+                        await channel.send(daily['message'])
+                        print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
+                        last_daily_check[check_key] = True
+
+                    except Exception as e:
+                        print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
+
+        # 清理舊紀錄
         today_str = now.strftime('%Y-%m-%d')
         keys_to_remove = [k for k in last_daily_check if today_str not in k]
         for k in keys_to_remove:
             del last_daily_check[k]
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(5)
 
 def main():
     token = os.getenv('DISCORD_TOKEN')
