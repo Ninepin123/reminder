@@ -84,11 +84,14 @@ def add_reminder(channel_id: int, message: str, time: datetime, user_id: int, gu
     if not conn:
         return False
 
+    # 將帶時區的 datetime 轉換為 naive datetime，確保存儲一致性
+    time_naive = time.replace(tzinfo=None) if time.tzinfo else time
+
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO reminders (channel_id, message, time, user_id, guild_id)
         VALUES (%s, %s, %s, %s, %s)
-    ''', (channel_id, message, time, user_id, guild_id))
+    ''', (channel_id, message, time_naive, user_id, guild_id))
     conn.commit()
     cursor.close()
     conn.close()
@@ -129,8 +132,11 @@ def get_due_reminders(now: datetime):
     if not conn:
         return []
 
+    # 將帶時區的 datetime 轉換為 naive datetime，避免時區比對問題
+    now_naive = now.replace(tzinfo=None)
+
     cursor = conn.cursor(dictionary=True)
-    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now,))
+    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now_naive,))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
