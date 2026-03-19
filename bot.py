@@ -25,6 +25,8 @@ MYSQL_USER = os.getenv('MYSQL_USER')
 MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
 
+MYSQL_POOL_SIZE = int(os.getenv('MYSQL_POOL_SIZE', 5))
+
 db_pool = None
 
 def init_db_pool():
@@ -32,7 +34,7 @@ def init_db_pool():
     try:
         db_pool = mysql.connector.pooling.MySQLConnectionPool(
             pool_name="mypool",
-            pool_size=5,
+            pool_size=MYSQL_POOL_SIZE,
             pool_reset_session=True,
             host=MYSQL_HOST,
             port=MYSQL_PORT,
@@ -64,6 +66,7 @@ def init_db():
     if not conn:
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor()
 
@@ -94,22 +97,28 @@ def init_db():
         ''')
 
         # 嘗試新增 last_triggered_date 欄位 (相容舊版本)
-        try:
+        cursor.execute('''
+            SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'daily_reminders' AND COLUMN_NAME = 'last_triggered_date'
+        ''', (MYSQL_DATABASE,))
+        if cursor.fetchone()[0] == 0:
             cursor.execute("ALTER TABLE daily_reminders ADD COLUMN last_triggered_date DATE")
-        except Error:
-            pass # 欄位可能已存在
 
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def add_reminder(channel_id: int, message: str, reminder_time: datetime, user_id: int, guild_id: int):
     """新增一次性提醒"""
     conn = get_db_connection()
     if not conn:
+        print("[add_reminder] 無法取得資料庫連線")
         return False
 
+    cursor = None
     try:
         # 將帶時區的 datetime 轉換為 naive datetime，確保存儲一致性
         time_naive = reminder_time.replace(tzinfo=None) if reminder_time.tzinfo else reminder_time
@@ -122,6 +131,8 @@ def add_reminder(channel_id: int, message: str, reminder_time: datetime, user_id
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_reminders(user_id: int = None):
@@ -130,6 +141,7 @@ def get_reminders(user_id: int = None):
     if not conn:
         return []
 
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
 
@@ -140,6 +152,8 @@ def get_reminders(user_id: int = None):
 
         return cursor.fetchall()
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_due_reminders(now: datetime):
@@ -148,6 +162,7 @@ def get_due_reminders(now: datetime):
     if not conn:
         return []
 
+    cursor = None
     try:
         # 將帶時區的 datetime 轉換為 naive datetime，避免時區比對問題
         now_naive = now.replace(tzinfo=None)
@@ -156,6 +171,8 @@ def get_due_reminders(now: datetime):
         cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now_naive,))
         return cursor.fetchall()
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def delete_reminder(reminder_id: int):
@@ -164,12 +181,15 @@ def delete_reminder(reminder_id: int):
     if not conn:
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def delete_reminder_by_user(user_id: int, index: int):
@@ -178,6 +198,7 @@ def delete_reminder_by_user(user_id: int, index: int):
     if not conn:
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id FROM reminders WHERE user_id = %s ORDER BY time', (user_id,))
@@ -190,14 +211,18 @@ def delete_reminder_by_user(user_id: int, index: int):
             return True
         return False
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def add_daily_reminder(channel_id: int, message: str, reminder_time: str, user_id: int, guild_id: int):
     """新增每日提醒"""
     conn = get_db_connection()
     if not conn:
+        print("[add_daily_reminder] 無法取得資料庫連線")
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute('''
@@ -207,6 +232,8 @@ def add_daily_reminder(channel_id: int, message: str, reminder_time: str, user_i
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_daily_reminders(user_id: int = None, time_filter: str = None):
@@ -215,6 +242,7 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
     if not conn:
         return []
 
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
 
@@ -226,7 +254,7 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
             conditions.append('user_id = %s')
             params.append(user_id)
         if time_filter is not None:
-            conditions.append('time = %s')
+            conditions.append('time <= %s')
             params.append(time_filter)
 
         if conditions:
@@ -236,6 +264,8 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
         cursor.execute(query, tuple(params))
         return cursor.fetchall()
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def delete_daily_reminder(reminder_id: int):
@@ -244,12 +274,15 @@ def delete_daily_reminder(reminder_id: int):
     if not conn:
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM daily_reminders WHERE id = %s', (reminder_id,))
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def delete_daily_reminder_by_user(user_id: int, index: int):
@@ -258,6 +291,7 @@ def delete_daily_reminder_by_user(user_id: int, index: int):
     if not conn:
         return False
 
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute('SELECT id FROM daily_reminders WHERE user_id = %s ORDER BY time', (user_id,))
@@ -270,6 +304,8 @@ def delete_daily_reminder_by_user(user_id: int, index: int):
             return True
         return False
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 def update_daily_last_triggered(reminder_id: int, triggered_date: date):
@@ -277,12 +313,16 @@ def update_daily_last_triggered(reminder_id: int, triggered_date: date):
     conn = get_db_connection()
     if not conn:
         return False
+
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute('UPDATE daily_reminders SET last_triggered_date = %s WHERE id = %s', (triggered_date, reminder_id))
         conn.commit()
         return True
     finally:
+        if cursor:
+            cursor.close()
         conn.close()
 
 class ReminderBot(commands.Bot):
@@ -473,13 +513,15 @@ async def cancel_daily(interaction: discord.Interaction, index: int):
         return
 
     removed = user_dailies[index - 1]
-    await asyncio.to_thread(delete_daily_reminder_by_user, interaction.user.id, index)
+    await asyncio.to_thread(delete_daily_reminder, removed['id'])
 
     await interaction.followup.send(f"✅ 已取消每日提醒：{removed['message'][:50]}")
 
 async def check_reminders():
     """背景任務：檢查並發送提醒"""
     await bot.wait_until_ready()
+
+    consecutive_errors = 0
 
     while not bot.is_closed():
         try:
@@ -507,6 +549,7 @@ async def check_reminders():
                     print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
 
             # === 檢查每日提醒 ===
+            # 使用 <= 比對，避免因延遲跳過某分鐘而漏發
             current_time_str = now.strftime('%H:%M')
             daily_reminders = await asyncio.to_thread(get_daily_reminders, None, current_time_str)
             today_date = now.date()
@@ -523,7 +566,7 @@ async def check_reminders():
 
                     await channel.send(daily['message'])
                     print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
-                    
+
                     # 更新最後觸發日期為今天
                     await asyncio.to_thread(update_daily_last_triggered, daily['id'], today_date)
 
@@ -533,8 +576,14 @@ async def check_reminders():
                 except Exception as e:
                     print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
 
+            consecutive_errors = 0
+
         except Exception as e:
-            print(f"[背景任務發生錯誤] {e}")
+            consecutive_errors += 1
+            backoff = min(5 * (2 ** consecutive_errors), 300)
+            print(f"[背景任務發生錯誤] (連續第 {consecutive_errors} 次) {e}, {backoff} 秒後重試")
+            await asyncio.sleep(backoff)
+            continue
 
         await asyncio.sleep(5)
 
