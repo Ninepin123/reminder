@@ -1,11 +1,12 @@
 import os
 import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Optional
 import mysql.connector
 from mysql.connector import Error
+from mysql.connector import pooling
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,10 +25,15 @@ MYSQL_USER = os.getenv('MYSQL_USER')
 MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DATABASE = os.getenv('MYSQL_DATABASE')
 
-def get_db_connection():
-    """取得資料庫連線"""
+db_pool = None
+
+def init_db_pool():
+    global db_pool
     try:
-        conn = mysql.connector.connect(
+        db_pool = mysql.connector.pooling.MySQLConnectionPool(
+            pool_name="mypool",
+            pool_size=5,
+            pool_reset_session=True,
             host=MYSQL_HOST,
             port=MYSQL_PORT,
             user=MYSQL_USER,
@@ -35,9 +41,21 @@ def get_db_connection():
             database=MYSQL_DATABASE,
             charset='utf8mb4'
         )
-        return conn
+        return True
     except Error as e:
-        print(f"資料庫連線錯誤: {e}")
+        print(f"初始化連線池錯誤: {e}")
+        return False
+
+def get_db_connection():
+    """取得資料庫連線"""
+    global db_pool
+    if db_pool is None:
+        if not init_db_pool():
+            return None
+    try:
+        return db_pool.get_connection()
+    except Error as e:
+        print(f"取得資料庫連線錯誤: {e}")
         return None
 
 def init_db():
@@ -70,9 +88,16 @@ def init_db():
                 time VARCHAR(5) NOT NULL,
                 user_id BIGINT NOT NULL,
                 guild_id BIGINT,
-                created_at DATETIME
+                created_at DATETIME,
+                last_triggered_date DATE
             )
         ''')
+
+        # 嘗試新增 last_triggered_date 欄位 (相容舊版本)
+        try:
+            cursor.execute("ALTER TABLE daily_reminders ADD COLUMN last_triggered_date DATE")
+        except Error:
+            pass # 欄位可能已存在
 
         conn.commit()
         return True
@@ -193,7 +218,7 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
     try:
         cursor = conn.cursor(dictionary=True)
 
-        query = 'SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders'
+        query = 'SELECT id, channel_id, message, time, user_id, guild_id, last_triggered_date FROM daily_reminders'
         params = []
         conditions = []
 
@@ -210,6 +235,20 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
         query += ' ORDER BY time'
         cursor.execute(query, tuple(params))
         return cursor.fetchall()
+    finally:
+        conn.close()
+
+def delete_daily_reminder(reminder_id: int):
+    """刪除每日提醒"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM daily_reminders WHERE id = %s', (reminder_id,))
+        conn.commit()
+        return True
     finally:
         conn.close()
 
@@ -233,6 +272,19 @@ def delete_daily_reminder_by_user(user_id: int, index: int):
     finally:
         conn.close()
 
+def update_daily_last_triggered(reminder_id: int, triggered_date: date):
+    """更新每日提醒最後觸發日期"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE daily_reminders SET last_triggered_date = %s WHERE id = %s', (triggered_date, reminder_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
 class ReminderBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -240,7 +292,9 @@ class ReminderBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        await self.tree.sync()
+        # 建議有需要時手動同步，避免被 Discord API Rate Limit 阻擋
+        # await self.tree.sync()
+        pass
 
     async def on_ready(self):
         print(f'已登入: {self.user}')
@@ -252,6 +306,13 @@ class ReminderBot(commands.Bot):
         self.loop.create_task(check_reminders())
 
 bot = ReminderBot()
+
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    """手動同步 Slash 指令 (限機器人擁有者)"""
+    await bot.tree.sync()
+    await ctx.send("✅ Slash 指令已全域同步！")
 
 def parse_time(time_str: str) -> Optional[datetime]:
     time_str = time_str.strip()
@@ -297,21 +358,15 @@ def parse_time(time_str: str) -> Optional[datetime]:
 )
 async def remind(interaction: discord.Interaction, message: str, time: str):
     """設置提醒命令"""
+    await interaction.response.defer(ephemeral=True)
     reminder_time = parse_time(time)
 
     if reminder_time is None:
-        await interaction.response.send_message(
-            "❌ 無法解析時間格式！\n"
-            "支援格式：`5s`, `10m`, `2h`, `1d`, `15:30`, `2024-03-16 15:30`",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ 無法解析時間格式！\n支援格式：`5s`, `10m`, `2h`, `1d`, `15:30`, `2024-03-16 15:30`")
         return
 
     if reminder_time < datetime.now(TZ):
-        await interaction.response.send_message(
-            "❌ 提醒時間不能是過去的時間！",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ 提醒時間不能是過去的時間！")
         return
 
     success = await asyncio.to_thread(
@@ -324,17 +379,13 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
     )
     if success:
         time_display = reminder_time.strftime('%Y-%m-%d %H:%M:%S')
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 已設置提醒！\n"
             f"📝 內容：{message}\n"
-            f"⏰ 時間：{time_display}",
-            ephemeral=True
+            f"⏰ 時間：{time_display}"
         )
     else:
-        await interaction.response.send_message(
-            "❌ 設置提醒失敗，請稍後再試",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ 設置提醒失敗，請稍後再試")
 
 @bot.tree.command(name="daily", description="設置每天定時提醒")
 @app_commands.describe(
@@ -343,14 +394,12 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
 )
 async def daily_remind(interaction: discord.Interaction, message: str, time: str):
     """設置每日提醒命令"""
+    await interaction.response.defer(ephemeral=True)
     try:
         parsed_time = datetime.strptime(time, '%H:%M')
         formatted_time = parsed_time.strftime('%H:%M')
     except ValueError:
-        await interaction.response.send_message(
-            "❌ 無法解析時間格式！請使用 `HH:MM` 格式，例如：`09:00`",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ 無法解析時間格式！請使用 `HH:MM` 格式，例如：`09:00`")
         return
 
     success = await asyncio.to_thread(
@@ -362,26 +411,23 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         guild_id=interaction.guild_id
     )
     if success:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ 已設置每日提醒！\n"
             f"📝 內容：{message}\n"
-            f"⏰ 每天時間：{formatted_time}",
-            ephemeral=True
+            f"⏰ 每天時間：{formatted_time}"
         )
     else:
-        await interaction.response.send_message(
-            "❌ 設置每日提醒失敗，請稍後再試",
-            ephemeral=True
-        )
+        await interaction.followup.send("❌ 設置每日提醒失敗，請稍後再試")
 
 @bot.tree.command(name="reminders", description="查看所有待處理的提醒")
 async def list_reminders(interaction: discord.Interaction):
     """列出所有提醒"""
+    await interaction.response.defer(ephemeral=True)
     user_reminders = await asyncio.to_thread(get_reminders, interaction.user.id)
     user_dailies = await asyncio.to_thread(get_daily_reminders, interaction.user.id)
 
     if not user_reminders and not user_dailies:
-        await interaction.response.send_message("📭 你沒有待處理的提醒。", ephemeral=True)
+        await interaction.followup.send("📭 你沒有待處理的提醒。")
         return
 
     embed = discord.Embed(title="📋 你的提醒列表", color=discord.Color.blue())
@@ -397,48 +443,43 @@ async def list_reminders(interaction: discord.Interaction):
             message_preview = daily['message'][:40] + "..." if len(daily['message']) > 40 else daily['message']
             embed.add_field(name=f"📆 每日 #{i}", value=f"⏰ 每天 {daily['time']}\n📝 {message_preview}", inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="cancel", description="取消一次性提醒")
 @app_commands.describe(index="要取消的提醒編號（使用 /reminders 查看）")
 async def cancel_reminder(interaction: discord.Interaction, index: int):
     """取消提醒"""
+    await interaction.response.defer(ephemeral=True)
     user_reminders = await asyncio.to_thread(get_reminders, interaction.user.id)
 
     if index < 1 or index > len(user_reminders):
-        await interaction.response.send_message("❌ 無效的提醒編號！", ephemeral=True)
+        await interaction.followup.send("❌ 無效的提醒編號！")
         return
 
     removed = user_reminders[index - 1]
     await asyncio.to_thread(delete_reminder, removed['id'])
 
-    await interaction.response.send_message(
-        f"✅ 已取消提醒：{removed['message'][:50]}",
-        ephemeral=True
-    )
+    await interaction.followup.send(f"✅ 已取消提醒：{removed['message'][:50]}")
 
 @bot.tree.command(name="canceldaily", description="取消每日提醒")
 @app_commands.describe(index="要取消的每日提醒編號（使用 /reminders 查看）")
 async def cancel_daily(interaction: discord.Interaction, index: int):
     """取消每日提醒"""
+    await interaction.response.defer(ephemeral=True)
     user_dailies = await asyncio.to_thread(get_daily_reminders, interaction.user.id)
 
     if index < 1 or index > len(user_dailies):
-        await interaction.response.send_message("❌ 無效的每日提醒編號！", ephemeral=True)
+        await interaction.followup.send("❌ 無效的每日提醒編號！")
         return
 
     removed = user_dailies[index - 1]
     await asyncio.to_thread(delete_daily_reminder_by_user, interaction.user.id, index)
 
-    await interaction.response.send_message(
-        f"✅ 已取消每日提醒：{removed['message'][:50]}",
-        ephemeral=True
-    )
+    await interaction.followup.send(f"✅ 已取消每日提醒：{removed['message'][:50]}")
 
 async def check_reminders():
     """背景任務：檢查並發送提醒"""
     await bot.wait_until_ready()
-    last_daily_check = {}
 
     while not bot.is_closed():
         try:
@@ -459,34 +500,38 @@ async def check_reminders():
                     # 只有送成功才刪除
                     await asyncio.to_thread(delete_reminder, reminder['id'])
 
+                except (discord.Forbidden, discord.NotFound) as e:
+                    print(f"[{'權限不足' if isinstance(e, discord.Forbidden) else '找不到頻道'}] 刪除提醒: {reminder['id']}")
+                    await asyncio.to_thread(delete_reminder, reminder['id'])
                 except Exception as e:
                     print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
 
             # === 檢查每日提醒 ===
             current_time_str = now.strftime('%H:%M')
             daily_reminders = await asyncio.to_thread(get_daily_reminders, None, current_time_str)
+            today_date = now.date()
 
             for daily in daily_reminders:
-                check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
+                # 若今天已經發送過，則跳過
+                if daily.get('last_triggered_date') == today_date:
+                    continue
 
-                if check_key not in last_daily_check:
-                    try:
-                        channel = bot.get_channel(daily['channel_id'])
-                        if channel is None:
-                            channel = await bot.fetch_channel(daily['channel_id'])
+                try:
+                    channel = bot.get_channel(daily['channel_id'])
+                    if channel is None:
+                        channel = await bot.fetch_channel(daily['channel_id'])
 
-                        await channel.send(daily['message'])
-                        print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
-                        last_daily_check[check_key] = True
+                    await channel.send(daily['message'])
+                    print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
+                    
+                    # 更新最後觸發日期為今天
+                    await asyncio.to_thread(update_daily_last_triggered, daily['id'], today_date)
 
-                    except Exception as e:
-                        print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
-
-            # 清理舊紀錄
-            today_str = now.strftime('%Y-%m-%d')
-            keys_to_remove = [k for k in last_daily_check if today_str not in k]
-            for k in keys_to_remove:
-                del last_daily_check[k]
+                except (discord.Forbidden, discord.NotFound) as e:
+                    print(f"[{'權限不足' if isinstance(e, discord.Forbidden) else '找不到頻道'}] 刪除每日提醒: {daily['id']}")
+                    await asyncio.to_thread(delete_daily_reminder, daily['id'])
+                except Exception as e:
+                    print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
 
         except Exception as e:
             print(f"[背景任務發生錯誤] {e}")

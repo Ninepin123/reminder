@@ -61,9 +61,16 @@ def migrate():
             time VARCHAR(5) NOT NULL,
             user_id BIGINT NOT NULL,
             guild_id BIGINT,
-            created_at DATETIME
+            created_at DATETIME,
+            last_triggered_date DATE
         )
     ''')
+
+    # 嘗試新增 last_triggered_date 欄位 (相容已存在的表)
+    try:
+        cursor.execute("ALTER TABLE daily_reminders ADD COLUMN last_triggered_date DATE")
+    except Error:
+        pass
 
     conn.commit()
 
