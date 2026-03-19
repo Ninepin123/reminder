@@ -46,56 +46,58 @@ def init_db():
     if not conn:
         return False
 
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    # 一次性提醒表
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            channel_id BIGINT NOT NULL,
-            message TEXT NOT NULL,
-            time DATETIME NOT NULL,
-            user_id BIGINT NOT NULL,
-            guild_id BIGINT
-        )
-    ''')
+        # 一次性提醒表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message TEXT NOT NULL,
+                time DATETIME NOT NULL,
+                user_id BIGINT NOT NULL,
+                guild_id BIGINT
+            )
+        ''')
 
-    # 每日提醒表
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_reminders (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            channel_id BIGINT NOT NULL,
-            message TEXT NOT NULL,
-            time VARCHAR(5) NOT NULL,
-            user_id BIGINT NOT NULL,
-            guild_id BIGINT,
-            created_at DATETIME
-        )
-    ''')
+        # 每日提醒表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_reminders (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message TEXT NOT NULL,
+                time VARCHAR(5) NOT NULL,
+                user_id BIGINT NOT NULL,
+                guild_id BIGINT,
+                created_at DATETIME
+            )
+        ''')
 
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return True
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
-def add_reminder(channel_id: int, message: str, time: datetime, user_id: int, guild_id: int):
+def add_reminder(channel_id: int, message: str, reminder_time: datetime, user_id: int, guild_id: int):
     """新增一次性提醒"""
     conn = get_db_connection()
     if not conn:
         return False
 
-    # 將帶時區的 datetime 轉換為 naive datetime，確保存儲一致性
-    time_naive = time.replace(tzinfo=None) if time.tzinfo else time
+    try:
+        # 將帶時區的 datetime 轉換為 naive datetime，確保存儲一致性
+        time_naive = reminder_time.replace(tzinfo=None) if reminder_time.tzinfo else reminder_time
 
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO reminders (channel_id, message, time, user_id, guild_id)
-        VALUES (%s, %s, %s, %s, %s)
-    ''', (channel_id, message, time_naive, user_id, guild_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return True
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO reminders (channel_id, message, time, user_id, guild_id)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', (channel_id, message, time_naive, user_id, guild_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 def get_reminders(user_id: int = None):
     """取得提醒列表"""
@@ -103,28 +105,17 @@ def get_reminders(user_id: int = None):
     if not conn:
         return []
 
-    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor = conn.cursor(dictionary=True)
 
-    if user_id:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE user_id = %s', (user_id,))
-    else:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders')
+        if user_id is not None:
+            cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE user_id = %s ORDER BY time', (user_id,))
+        else:
+            cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders ORDER BY time')
 
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-
-    reminders = []
-    for row in rows:
-        reminders.append({
-            'id': row['id'],
-            'channel_id': row['channel_id'],
-            'message': row['message'],
-            'time': row['time'],
-            'user_id': row['user_id'],
-            'guild_id': row['guild_id']
-        })
-    return reminders
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 def get_due_reminders(now: datetime):
     """取得到期的提醒"""
@@ -132,26 +123,15 @@ def get_due_reminders(now: datetime):
     if not conn:
         return []
 
-    # 將帶時區的 datetime 轉換為 naive datetime，避免時區比對問題
-    now_naive = now.replace(tzinfo=None)
+    try:
+        # 將帶時區的 datetime 轉換為 naive datetime，避免時區比對問題
+        now_naive = now.replace(tzinfo=None)
 
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now_naive,))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-
-    reminders = []
-    for row in rows:
-        reminders.append({
-            'id': row['id'],
-            'channel_id': row['channel_id'],
-            'message': row['message'],
-            'time': row['time'],
-            'user_id': row['user_id'],
-            'guild_id': row['guild_id']
-        })
-    return reminders
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM reminders WHERE time <= %s', (now_naive,))
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 def delete_reminder(reminder_id: int):
     """刪除提醒"""
@@ -159,12 +139,13 @@ def delete_reminder(reminder_id: int):
     if not conn:
         return False
 
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return True
+    try:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 def delete_reminder_by_user(user_id: int, index: int):
     """根據用戶和索引刪除提醒"""
@@ -172,65 +153,65 @@ def delete_reminder_by_user(user_id: int, index: int):
     if not conn:
         return False
 
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute('SELECT id FROM reminders WHERE user_id = %s ORDER BY time', (user_id,))
-    rows = cursor.fetchall()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id FROM reminders WHERE user_id = %s ORDER BY time', (user_id,))
+        rows = cursor.fetchall()
 
-    if 1 <= index <= len(rows):
-        reminder_id = rows[index - 1]['id']
-        cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
-        conn.commit()
-        cursor.close()
+        if 1 <= index <= len(rows):
+            reminder_id = rows[index - 1]['id']
+            cursor.execute('DELETE FROM reminders WHERE id = %s', (reminder_id,))
+            conn.commit()
+            return True
+        return False
+    finally:
         conn.close()
-        return True
-    cursor.close()
-    conn.close()
-    return False
 
-def add_daily_reminder(channel_id: int, message: str, time: str, user_id: int, guild_id: int):
+def add_daily_reminder(channel_id: int, message: str, reminder_time: str, user_id: int, guild_id: int):
     """新增每日提醒"""
     conn = get_db_connection()
     if not conn:
         return False
 
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO daily_reminders (channel_id, message, time, user_id, guild_id, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ).replace(tzinfo=None)))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return True
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO daily_reminders (channel_id, message, time, user_id, guild_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (channel_id, message, reminder_time, user_id, guild_id, datetime.now(TZ).replace(tzinfo=None)))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
-def get_daily_reminders(user_id: int = None):
+def get_daily_reminders(user_id: int = None, time_filter: str = None):
     """取得每日提醒列表"""
     conn = get_db_connection()
     if not conn:
         return []
 
-    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor = conn.cursor(dictionary=True)
 
-    if user_id:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders WHERE user_id = %s', (user_id,))
-    else:
-        cursor.execute('SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders')
+        query = 'SELECT id, channel_id, message, time, user_id, guild_id FROM daily_reminders'
+        params = []
+        conditions = []
 
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+        if user_id is not None:
+            conditions.append('user_id = %s')
+            params.append(user_id)
+        if time_filter is not None:
+            conditions.append('time = %s')
+            params.append(time_filter)
 
-    dailies = []
-    for row in rows:
-        dailies.append({
-            'id': row['id'],
-            'channel_id': row['channel_id'],
-            'message': row['message'],
-            'time': row['time'],
-            'user_id': row['user_id'],
-            'guild_id': row['guild_id']
-        })
-    return dailies
+        if conditions:
+            query += ' WHERE ' + ' AND '.join(conditions)
+
+        query += ' ORDER BY time'
+        cursor.execute(query, tuple(params))
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 def delete_daily_reminder_by_user(user_id: int, index: int):
     """根據用戶和索引刪除每日提醒"""
@@ -238,20 +219,19 @@ def delete_daily_reminder_by_user(user_id: int, index: int):
     if not conn:
         return False
 
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute('SELECT id FROM daily_reminders WHERE user_id = %s ORDER BY time', (user_id,))
-    rows = cursor.fetchall()
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT id FROM daily_reminders WHERE user_id = %s ORDER BY time', (user_id,))
+        rows = cursor.fetchall()
 
-    if 1 <= index <= len(rows):
-        reminder_id = rows[index - 1]['id']
-        cursor.execute('DELETE FROM daily_reminders WHERE id = %s', (reminder_id,))
-        conn.commit()
-        cursor.close()
+        if 1 <= index <= len(rows):
+            reminder_id = rows[index - 1]['id']
+            cursor.execute('DELETE FROM daily_reminders WHERE id = %s', (reminder_id,))
+            conn.commit()
+            return True
+        return False
+    finally:
         conn.close()
-        return True
-    cursor.close()
-    conn.close()
-    return False
 
 class ReminderBot(commands.Bot):
     def __init__(self):
@@ -265,14 +245,10 @@ class ReminderBot(commands.Bot):
     async def on_ready(self):
         print(f'已登入: {self.user}')
         print(f'當前時間 (台灣): {datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")}')
-        if await asyncio.to_thread(init_db):
-            print('✅ 資料庫連線成功')
-            reminders = await asyncio.to_thread(get_reminders)
-            dailies = await asyncio.to_thread(get_daily_reminders)
-            print(f'一次性提醒: {len(reminders)} 個')
-            print(f'每日提醒: {len(dailies)} 個')
-        else:
-            print('❌ 資料庫連線失敗')
+        reminders = await asyncio.to_thread(get_reminders)
+        dailies = await asyncio.to_thread(get_daily_reminders)
+        print(f'一次性提醒: {len(reminders)} 個')
+        print(f'每日提醒: {len(dailies)} 個')
         self.loop.create_task(check_reminders())
 
 bot = ReminderBot()
@@ -342,7 +318,7 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
         add_reminder,
         channel_id=interaction.channel_id,
         message=message,
-        time=reminder_time,
+        reminder_time=reminder_time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
     )
@@ -381,7 +357,7 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         add_daily_reminder,
         channel_id=interaction.channel_id,
         message=message,
-        time=formatted_time,
+        reminder_time=formatted_time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
     )
@@ -488,24 +464,23 @@ async def check_reminders():
 
             # === 檢查每日提醒 ===
             current_time_str = now.strftime('%H:%M')
-            daily_reminders = await asyncio.to_thread(get_daily_reminders)
+            daily_reminders = await asyncio.to_thread(get_daily_reminders, None, current_time_str)
 
             for daily in daily_reminders:
-                if daily['time'] == current_time_str:
-                    check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
+                check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
 
-                    if check_key not in last_daily_check:
-                        try:
-                            channel = bot.get_channel(daily['channel_id'])
-                            if channel is None:
-                                channel = await bot.fetch_channel(daily['channel_id'])
+                if check_key not in last_daily_check:
+                    try:
+                        channel = bot.get_channel(daily['channel_id'])
+                        if channel is None:
+                            channel = await bot.fetch_channel(daily['channel_id'])
 
-                            await channel.send(daily['message'])
-                            print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
-                            last_daily_check[check_key] = True
+                        await channel.send(daily['message'])
+                        print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
+                        last_daily_check[check_key] = True
 
-                        except Exception as e:
-                            print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
+                    except Exception as e:
+                        print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
 
             # 清理舊紀錄
             today_str = now.strftime('%Y-%m-%d')
@@ -529,7 +504,10 @@ def main():
         print("   MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE")
         return
 
-    init_db()
+    if not init_db():
+        print("❌ 資料庫初始化失敗")
+        return
+    print('✅ 資料庫連線成功')
     bot.run(token)
 
 if __name__ == "__main__":
