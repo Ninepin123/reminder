@@ -197,7 +197,7 @@ def add_daily_reminder(channel_id: int, message: str, time: str, user_id: int, g
     cursor.execute('''
         INSERT INTO daily_reminders (channel_id, message, time, user_id, guild_id, created_at)
         VALUES (%s, %s, %s, %s, %s, %s)
-    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ)))
+    ''', (channel_id, message, time, user_id, guild_id, datetime.now(TZ).replace(tzinfo=None)))
     conn.commit()
     cursor.close()
     conn.close()
@@ -368,7 +368,8 @@ async def remind(interaction: discord.Interaction, message: str, time: str):
 async def daily_remind(interaction: discord.Interaction, message: str, time: str):
     """設置每日提醒命令"""
     try:
-        datetime.strptime(time, '%H:%M')
+        parsed_time = datetime.strptime(time, '%H:%M')
+        formatted_time = parsed_time.strftime('%H:%M')
     except ValueError:
         await interaction.response.send_message(
             "❌ 無法解析時間格式！請使用 `HH:MM` 格式，例如：`09:00`",
@@ -380,7 +381,7 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         add_daily_reminder,
         channel_id=interaction.channel_id,
         message=message,
-        time=time,
+        time=formatted_time,
         user_id=interaction.user.id,
         guild_id=interaction.guild_id
     )
@@ -388,7 +389,7 @@ async def daily_remind(interaction: discord.Interaction, message: str, time: str
         await interaction.response.send_message(
             f"✅ 已設置每日提醒！\n"
             f"📝 內容：{message}\n"
-            f"⏰ 每天時間：{time}",
+            f"⏰ 每天時間：{formatted_time}",
             ephemeral=True
         )
     else:
@@ -464,52 +465,56 @@ async def check_reminders():
     last_daily_check = {}
 
     while not bot.is_closed():
-        now = datetime.now(TZ)
+        try:
+            now = datetime.now(TZ)
 
-        # === 檢查一次性提醒 ===
-        due_reminders = await asyncio.to_thread(get_due_reminders, now)
+            # === 檢查一次性提醒 ===
+            due_reminders = await asyncio.to_thread(get_due_reminders, now)
 
-        for reminder in due_reminders:
-            try:
-                channel = bot.get_channel(reminder['channel_id'])
-                if channel is None:
-                    channel = await bot.fetch_channel(reminder['channel_id'])
+            for reminder in due_reminders:
+                try:
+                    channel = bot.get_channel(reminder['channel_id'])
+                    if channel is None:
+                        channel = await bot.fetch_channel(reminder['channel_id'])
 
-                await channel.send(reminder['message'])
-                print(f"[提醒已發送] {reminder['time']} - {reminder['message']}")
+                    await channel.send(reminder['message'])
+                    print(f"[提醒已發送] {reminder['time']} - {reminder['message']}")
 
-                # 只有送成功才刪除
-                await asyncio.to_thread(delete_reminder, reminder['id'])
+                    # 只有送成功才刪除
+                    await asyncio.to_thread(delete_reminder, reminder['id'])
 
-            except Exception as e:
-                print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
+                except Exception as e:
+                    print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
 
-        # === 檢查每日提醒 ===
-        current_time_str = now.strftime('%H:%M')
-        daily_reminders = await asyncio.to_thread(get_daily_reminders)
+            # === 檢查每日提醒 ===
+            current_time_str = now.strftime('%H:%M')
+            daily_reminders = await asyncio.to_thread(get_daily_reminders)
 
-        for daily in daily_reminders:
-            if daily['time'] == current_time_str:
-                check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
+            for daily in daily_reminders:
+                if daily['time'] == current_time_str:
+                    check_key = f"{daily['id']}_{now.strftime('%Y-%m-%d')}"
 
-                if check_key not in last_daily_check:
-                    try:
-                        channel = bot.get_channel(daily['channel_id'])
-                        if channel is None:
-                            channel = await bot.fetch_channel(daily['channel_id'])
+                    if check_key not in last_daily_check:
+                        try:
+                            channel = bot.get_channel(daily['channel_id'])
+                            if channel is None:
+                                channel = await bot.fetch_channel(daily['channel_id'])
 
-                        await channel.send(daily['message'])
-                        print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
-                        last_daily_check[check_key] = True
+                            await channel.send(daily['message'])
+                            print(f"[每日提醒已發送] {daily['time']} - {daily['message']}")
+                            last_daily_check[check_key] = True
 
-                    except Exception as e:
-                        print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
+                        except Exception as e:
+                            print(f"[每日提醒發送失敗] daily_id={daily['id']}, error={e}")
 
-        # 清理舊紀錄
-        today_str = now.strftime('%Y-%m-%d')
-        keys_to_remove = [k for k in last_daily_check if today_str not in k]
-        for k in keys_to_remove:
-            del last_daily_check[k]
+            # 清理舊紀錄
+            today_str = now.strftime('%Y-%m-%d')
+            keys_to_remove = [k for k in last_daily_check if today_str not in k]
+            for k in keys_to_remove:
+                del last_daily_check[k]
+
+        except Exception as e:
+            print(f"[背景任務發生錯誤] {e}")
 
         await asyncio.sleep(5)
 
