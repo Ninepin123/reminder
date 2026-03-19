@@ -236,7 +236,7 @@ def add_daily_reminder(channel_id: int, message: str, reminder_time: str, user_i
             cursor.close()
         conn.close()
 
-def get_daily_reminders(user_id: int = None, time_filter: str = None):
+def get_daily_reminders(user_id: int = None, time_filter: str = None, date_filter: date = None):
     """取得每日提醒列表"""
     conn = get_db_connection()
     if not conn:
@@ -256,6 +256,9 @@ def get_daily_reminders(user_id: int = None, time_filter: str = None):
         if time_filter is not None:
             conditions.append('time <= %s')
             params.append(time_filter)
+        if date_filter is not None:
+            conditions.append('(last_triggered_date < %s OR last_triggered_date IS NULL)')
+            params.append(date_filter)
 
         if conditions:
             query += ' WHERE ' + ' AND '.join(conditions)
@@ -549,16 +552,12 @@ async def check_reminders():
                     print(f"[提醒發送失敗，保留資料稍後重試] reminder_id={reminder['id']}, error={e}")
 
             # === 檢查每日提醒 ===
-            # 使用 <= 比對，避免因延遲跳過某分鐘而漏發
+            # 使用 <= 比對搭配日期過濾，確保補發邏輯且不重複抓取
             current_time_str = now.strftime('%H:%M')
-            daily_reminders = await asyncio.to_thread(get_daily_reminders, None, current_time_str)
             today_date = now.date()
+            daily_reminders = await asyncio.to_thread(get_daily_reminders, None, current_time_str, today_date)
 
             for daily in daily_reminders:
-                # 若今天已經發送過，則跳過
-                if daily.get('last_triggered_date') == today_date:
-                    continue
-
                 try:
                     channel = bot.get_channel(daily['channel_id'])
                     if channel is None:
